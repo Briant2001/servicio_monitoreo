@@ -5,6 +5,8 @@ import socketserver
 import json
 from queue import Queue, Empty
 import re
+import sys
+import os
 from resource_path import resource_path
 from save_indicacion import save_indicacion
 from datetime import datetime 
@@ -34,6 +36,20 @@ LAST_READING = {"status": "SERVICIO_INICIADO"}
 data_lock = threading.Lock() 
 stop_event = threading.Event()
 command_queue = Queue() 
+
+def obtener_ruta_guardado(nombre_archivo):
+    """
+    Calcula la ruta en la carpeta real donde se encuentra el archivo ejecutable (.exe)
+    o el script (.py), evitando las carpetas temporales de PyInstaller.
+    """
+    if getattr(sys, 'frozen', False):
+        # Si corre desde el .exe, guarda al lado del .exe
+        base_path = os.path.dirname(sys.executable)
+    else:
+        # Si corre en modo desarrollo .py
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    return os.path.join(base_path, nombre_archivo)
 
 # ----------------------------------------------------------------------
 #                         HILO LECTOR SERIAL (THE CONSUMER)
@@ -108,7 +124,7 @@ def read_loop(ser):
             # Usamos b'\r' como terminador, común en instrumentos RPM4.
             # ser.read_until() espera hasta que el terminador o el timeout ocurran.
             response_bytes = ser.readline().decode("ascii",errors='ignore').strip()
-            # response_bytes = "#0001CH1=1747CH2=2122CH3=758CH4=1834CH5=0CH6=0CH7=0CH8=0*"
+            # response_bytes = "#0001CH1=1747CH2=2332CH3=758CH4=1834CH5=0CH6=0CH7=0CH8=0*"
             
             if response_bytes:
                 match1 = re.search(r'CH1=(\d+)', response_bytes)
@@ -124,36 +140,45 @@ def read_loop(ser):
                     valor_temp_2 = float(match4.group(1))
                     
                     # AJUSTAR INDICACION DE PRESION
-                    valor_presion = (4095-int(valor_presion)) * (1050 - 750) / 4095  # Invertir el valor para que 0 sea 4095 y viceversa
+                    #Presion = maximo-((( 4095-Dato) * (max - Minimo)) / 4095) + Offset
+                    valor_presion = (((4095-valor_presion)*(1050-750))/4095) # Invertir el valor para que 0 sea 4095 y viceversa
+                    # valor_presion = (4095-int(valor_presion)) * (1050 - 750) / 4095  # Invertir el valor para que 0 sea 4095 y viceversa
                     valor_presion = 1050 - valor_presion  # Ajustar para que 0 corresponda a 1050 y 4095 a 750
                     
-                    valor_temp = (4095-int(valor_temp)) * (1050 - 750) / 4095  # Invertir el valor para que 0 sea 4095 y viceversa
-                    valor_temp = 1050 - valor_temp  # Ajustar para que 0 correspon
+                    
+                    valor_temp = 41.70-(((4095-valor_temp)*(41.70-0)))/4095 # Invertir el valor para que 0 sea 4095 y viceversa
                     valor_temp = round(valor_temp, 2)  # Redondear a 2 decimales
                     
-                    valor_temp_2 = (4095-int(valor_temp_2)) * (1050 - 750) / 4095  # Invertir el valor para que 0 sea 4095 y viceversa
-                    valor_temp_2 = 1050 - valor_temp_2  # Ajustar para que 0 corresponda a 1050 y viceversa
+                    valor_temp_2 = 41.70-(((4095-valor_temp_2)*(41.70-0))/4095) + (-0.80) # Invertir el valor para que 0 sea 4095 y viceversa
                     valor_temp_2 = round(valor_temp_2, 2)  # Redondear a 2 decimales
                     
                     
                     #Ajustar Indicacion De Humedad Relativa
                     valor_hr = 100-(((3194-valor_hr)*(100-0)))/2539
                     
-                    csv_path = resource_path(f"Condiciones Ambientales{datetime.now().strftime('%Y-%m-%d')}.csv")
+                    nombre_csv = f"Condiciones Ambientales_{datetime.now().strftime('%Y-%m-%d')}.csv"
+                    csv_path = obtener_ruta_guardado(nombre_csv)
+                    
                     try:
                         res = save_indicacion(
-                        0, valor_presion, valor_temp, valor_hr, valor_temp_2,
-                        csv_path,
+                            0, valor_presion, valor_temp, valor_hr, valor_temp_2,
+                            csv_path,
                         )
                     except Exception as e:
+                        import traceback
                         print(f"[WARN] Error guardando indicaciones en CSV: {e}")
+                        traceback.print_exc()
                     
                     reading = {
                     "type": "reading",
                     "press": valor_presion or 0,  # Convertir a kPa y ajustar
+                    "pressUnidad": "hPa",  # Convertir a kPa y ajustar
                     "temperature_c": valor_temp or 0,
+                    "temp_1_unidad": "C",
                     "temperature_c_2": valor_temp_2 or 0,  # Evitar valores negativos o nulos
+                    "temp_2_unidad": "C",
                     "humidity_rh": valor_hr or 0,  # Evitar valores negativos o nulos
+                    "humidity_unidad": " HR",
                     "raw": response_bytes,
                     'unidad': "hPa"
                 }
@@ -162,7 +187,7 @@ def read_loop(ser):
                     with data_lock:
                         LAST_READING = reading
                     
-                    print(f"[SERIAL] ✅ Lectura: {reading['press']} , {reading['temperature_c']}°C, {reading['humidity_rh']}% RH, {reading['temperature_c_2']}°C")
+                    print(f"[SERIAL] ✅ Lectura: {reading['press']} {reading['unidad']}, {reading['temperature_c']} °C, {reading['humidity_rh']}% HR, {reading['temperature_c_2']} °C")
                 else:
                     print(f"[SERIAL] ⚠️ Dato sin formato esperado: {response_bytes}")
 
